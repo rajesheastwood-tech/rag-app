@@ -2,6 +2,7 @@ import streamlit as st
 import boto3
 import json
 import psycopg2
+from pypdf import PdfReader
 
 # ── CONFIG from Streamlit Secrets ────────────────────────
 DB_HOST     = st.secrets["DB_HOST"]
@@ -9,6 +10,8 @@ DB_NAME     = st.secrets["DB_NAME"]
 DB_USER     = st.secrets["DB_USER"]
 DB_PASSWORD = st.secrets["DB_PASSWORD"]
 TOP_K       = 5
+CHUNK_SIZE  = 500
+CHUNK_OVERLAP = 50
 
 bedrock = boto3.client(
     "bedrock-runtime",
@@ -18,6 +21,12 @@ bedrock = boto3.client(
 )
 # ─────────────────────────────────────────────────────────
 
+def get_conn():
+    return psycopg2.connect(
+        host=DB_HOST, dbname=DB_NAME,
+        user=DB_USER, password=DB_PASSWORD
+    )
+
 def embed(text):
     response = bedrock.invoke_model(
         modelId="amazon.titan-embed-text-v2:0",
@@ -25,20 +34,82 @@ def embed(text):
     )
     return json.loads(response["body"].read())["embedding"]
 
-def retrieve(question):
-    query_vector = embed(question)
-    conn = psycopg2.connect(
-        host=DB_HOST, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
-    )
+def chunk_text(text):
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start:start + CHUNK_SIZE])
+        start += CHUNK_SIZE - CHUNK_OVERLAP
+    return chunks
+
+def ingest_pdf(file, filename):
+    reader = PdfReader(file)
+    conn = get_conn()
     cur = conn.cursor()
+    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     cur.execute("""
-        SELECT chunk_text, source, page,
-               1 - (embedding <=> %s::vector) AS similarity
-        FROM document_chunks
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-    """, (query_vector, query_vector, TOP_K))
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id         BIGSERIAL PRIMARY KEY,
+            source     TEXT,
+            page       INT,
+            chunk_text TEXT,
+            embedding  vector(1024)
+        );
+    """)
+    cur.execute("DELETE FROM document_chunks WHERE source = %s", (filename,))
+    conn.commit()
+    total = 0
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text()
+        if not text or not text.strip():
+            continue
+        for chunk in chunk_text(text.strip()):
+            if not chunk.strip():
+                continue
+            vector = embed(chunk)
+            cur.execute("""
+                INSERT INTO document_chunks (source, page, chunk_text, embedding)
+                VALUES (%s, %s, %s, %s)
+            """, (filename, i + 1, chunk, vector))
+            total += 1
+    conn.commit()
+    cur.close()
+    conn.close()
+    return total
+
+def get_documents():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT source FROM document_chunks ORDER BY source")
+        docs = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return docs
+    except:
+        return []
+
+def retrieve(question, source_filter=None):
+    query_vector = embed(question)
+    conn = get_conn()
+    cur = conn.cursor()
+    if source_filter and source_filter != "All documents":
+        cur.execute("""
+            SELECT chunk_text, source, page,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM document_chunks
+            WHERE source = %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """, (query_vector, source_filter, query_vector, TOP_K))
+    else:
+        cur.execute("""
+            SELECT chunk_text, source, page,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM document_chunks
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """, (query_vector, query_vector, TOP_K))
     results = cur.fetchall()
     cur.close()
     conn.close()
@@ -69,7 +140,26 @@ Answer:"""
 # ── UI ────────────────────────────────────────────────────
 st.set_page_config(page_title="RAG Document Q&A", page_icon="📄")
 st.title("📄 Document Q&A")
-st.caption("Ask questions about your document using AI")
+st.caption("Upload a PDF and ask questions using AI")
+
+with st.sidebar:
+    st.header("📂 Documents")
+    uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+    if uploaded_file:
+        if st.button("Ingest Document"):
+            with st.spinner(f"Processing {uploaded_file.name}..."):
+                chunks = ingest_pdf(uploaded_file, uploaded_file.name)
+                st.success(f"✅ Ingested {chunks} chunks from {uploaded_file.name}")
+                st.session_state.messages = []
+    st.divider()
+    st.subheader("🗂 Select Document")
+    docs = get_documents()
+    if docs:
+        options = ["All documents"] + docs
+        selected_doc = st.selectbox("Ask questions about:", options)
+    else:
+        selected_doc = None
+        st.info("No documents ingested yet. Upload a PDF above!")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -81,19 +171,20 @@ for msg in st.session_state.messages:
 question = st.chat_input("Ask a question about your document...")
 
 if question:
-    st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.write(question)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Searching document and generating answer..."):
-            chunks = retrieve(question)
-            answer = generate(question, chunks)
-            st.write(answer)
-            with st.expander("📚 Source chunks used"):
-                for chunk, source, page, score in chunks:
-                    st.markdown(f"**Page {page}** (similarity: {score:.3f})")
-                    st.text(chunk[:300])
-                    st.divider()
-
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    if not docs:
+        st.warning("Please upload and ingest a document first!")
+    else:
+        st.session_state.messages.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.write(question)
+        with st.chat_message("assistant"):
+            with st.spinner("Searching and generating answer..."):
+                chunks = retrieve(question, selected_doc)
+                answer = generate(question, chunks)
+                st.write(answer)
+                with st.expander("📚 Source chunks used"):
+                    for chunk, source, page, score in chunks:
+                        st.markdown(f"**{source} — Page {page}** (similarity: {score:.3f})")
+                        st.text(chunk[:300])
+                        st.divider()
+        st.session_state.messages.append({"role": "assistant", "content": answer})
