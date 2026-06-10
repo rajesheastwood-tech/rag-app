@@ -137,11 +137,35 @@ Answer:"""
     )
     return json.loads(response["body"].read())["content"][0]["text"]
 
-# ── UI ────────────────────────────────────────────────────
-st.set_page_config(page_title="RAG Document Q&A", page_icon="📄")
-st.title("📄 Document Q&A")
-st.caption("Upload a PDF and ask questions using AI")
+# ── FIXED HEADER ──────────────────────────────────────────
+st.markdown("""
+    <style>
+        .fixed-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 999;
+            background-color: white;
+            padding: 1rem 2rem 0.5rem 2rem;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .block-container {
+            padding-top: 130px !important;
+        }
+    </style>
+    <div class="fixed-header">
+        <h1 style="margin:0; padding:0; font-size:1.8rem;">Rajesh's RAG Project</h1>
+        <h3 style="margin:0; padding:0; font-size:1rem; color:#444;">📄 Document Q&A</h3>
+        <p style="margin:4px 0 0 0; font-size:0.85rem; color:#666;">
+            This app can answer any questions from the documents (PDF) you upload. 
+            It is built using AWS Bedrock (Titan Embeddings + Claude Haiku), PgVector for storing 
+            and searching vectors, and Streamlit for the user interface.
+        </p>
+    </div>
+""", unsafe_allow_html=True)
 
+# ── SIDEBAR ───────────────────────────────────────────────
 with st.sidebar:
     st.header("📂 Documents")
     uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
@@ -161,6 +185,7 @@ with st.sidebar:
         selected_doc = None
         st.info("No documents ingested yet. Upload a PDF above!")
 
+# ── CHAT ──────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
