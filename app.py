@@ -3,15 +3,20 @@ import boto3
 import json
 import psycopg2
 
-# ── CONFIG ────────────────────────────────────────────────
-DB_HOST     = "database-2-instance-1.cbme4c06q3vg.us-east-2.rds.amazonaws.com"
-DB_NAME     = "postgres"
-DB_USER     = "postgres"
-DB_PASSWORD = "Database2026!"
+# ── CONFIG from Streamlit Secrets ────────────────────────
+DB_HOST     = st.secrets["DB_HOST"]
+DB_NAME     = st.secrets["DB_NAME"]
+DB_USER     = st.secrets["DB_USER"]
+DB_PASSWORD = st.secrets["DB_PASSWORD"]
 TOP_K       = 5
-# ─────────────────────────────────────────────────────────
 
-bedrock = boto3.client("bedrock-runtime", region_name="us-east-2")
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name=st.secrets["AWS_REGION"],
+    aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"]
+)
+# ─────────────────────────────────────────────────────────
 
 def embed(text):
     response = bedrock.invoke_model(
